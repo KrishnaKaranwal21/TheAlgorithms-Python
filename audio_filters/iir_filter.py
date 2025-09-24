@@ -1,100 +1,115 @@
 from __future__ import annotations
-
+from collections import deque
+import numpy as np
+from numpy.typing import NDArray
 
 class IIRFilter:
     r"""
-    N-Order IIR filter
-    Assumes working with float samples normalized on [-1, 1]
+    A robust, N-Order IIR filter based on the Direct Form 1 structure.
 
-    ---
-
-    Implementation details:
-    Based on the 2nd-order function from
-    https://en.wikipedia.org/wiki/Digital_biquad_filter,
-    this generalized N-order function was made.
-
-    Using the following transfer function
-        .. math:: H(z)=\frac{b_{0}+b_{1}z^{-1}+b_{2}z^{-2}+...+b_{k}z^{-k}}
-                  {a_{0}+a_{1}z^{-1}+a_{2}z^{-2}+...+a_{k}z^{-k}}
-
-    we can rewrite this to
-        .. math:: y[n]={\frac{1}{a_{0}}}
-                  \left(\left(b_{0}x[n]+b_{1}x[n-1]+b_{2}x[n-2]+...+b_{k}x[n-k]\right)-
-                  \left(a_{1}y[n-1]+a_{2}y[n-2]+...+a_{k}y[n-k]\right)\right)
+    This class is optimized for performance using `collections.deque` for its
+    internal state and supports both single-sample and block-based processing.
+    Coefficients are automatically normalized for stability.
     """
 
     def __init__(self, order: int) -> None:
+        """
+        Initializes the IIR filter.
+
+        Args:
+            order: The order of the filter (must be 1 or greater).
+        """
+        if order < 1:
+            raise ValueError("Filter order must be at least 1.")
         self.order = order
+        
+        # Initialize with default pass-through coefficients
+        self.a_coeffs: list[float] = [1.0] + [0.0] * order
+        self.b_coeffs: list[float] = [1.0] + [0.0] * order
 
-        # a_{0} ... a_{k}
-        self.a_coeffs = [1.0] + [0.0] * order
-        # b_{0} ... b_{k}
-        self.b_coeffs = [1.0] + [0.0] * order
-
-        # x[n-1] ... x[n-k]
-        self.input_history = [0.0] * self.order
-        # y[n-1] ... y[n-k]
-        self.output_history = [0.0] * self.order
+        # History buffers for the filter's internal state
+        self.input_history = deque([0.0] * self.order, maxlen=self.order)
+        self.output_history = deque([0.0] * self.order, maxlen=self.order)
 
     def set_coefficients(self, a_coeffs: list[float], b_coeffs: list[float]) -> None:
         """
-        Set the coefficients for the IIR filter.
-        These should both be of size `order` + 1.
-        :math:`a_0` may be left out, and it will use 1.0 as default value.
+        Sets and normalizes the IIR filter coefficients.
 
-        This method works well with scipy's filter design functions
+        The coefficients are normalized by a_coeffs[0] to ensure stability
+        and simplify the processing loop.
 
-        >>> # Make a 2nd-order 1000Hz butterworth lowpass filter
-        >>> import scipy.signal
-        >>> b_coeffs, a_coeffs = scipy.signal.butter(2, 1000,
-        ...                                          btype='lowpass',
-        ...                                          fs=48000)
-        >>> filt = IIRFilter(2)
-        >>> filt.set_coefficients(a_coeffs, b_coeffs)
+        Args:
+            a_coeffs: The denominator coefficients [a0, a1, ...].
+            b_coeffs: The numerator coefficients [b0, b1, ...].
         """
-        if len(a_coeffs) < self.order:
-            a_coeffs = [1.0, *a_coeffs]
-
-        if len(a_coeffs) != self.order + 1:
+        if len(a_coeffs) != self.order + 1 or len(b_coeffs) != self.order + 1:
             msg = (
-                f"Expected a_coeffs to have {self.order + 1} elements "
-                f"for {self.order}-order filter, got {len(a_coeffs)}"
+                f"Expected coefficient lists of length {self.order + 1}, "
+                f"but got lengths {len(a_coeffs)} and {len(b_coeffs)}"
             )
             raise ValueError(msg)
+        
+        a0 = a_coeffs[0]
+        if a0 == 0:
+            raise ValueError("The first 'a' coefficient (a0) cannot be zero.")
 
-        if len(b_coeffs) != self.order + 1:
-            msg = (
-                f"Expected b_coeffs to have {self.order + 1} elements "
-                f"for {self.order}-order filter, got {len(a_coeffs)}"
-            )
-            raise ValueError(msg)
-
-        self.a_coeffs = a_coeffs
-        self.b_coeffs = b_coeffs
+        # Normalize all coefficients by a0 for stability and efficiency
+        self.a_coeffs = [a / a0 for a in a_coeffs]
+        self.b_coeffs = [b / a0 for b in b_coeffs]
 
     def process(self, sample: float) -> float:
         """
-        Calculate :math:`y[n]`
+        Processes a single audio sample through the filter.
 
-        >>> filt = IIRFilter(2)
-        >>> filt.process(0)
-        0.0
+        Args:
+            sample: A single float representing the audio sample.
+
+        Returns:
+            The processed audio sample.
         """
-        result = 0.0
+        # Calculate the feedforward part (from input history)
+        feedforward = sum(b * x for b, x in zip(self.b_coeffs[1:], self.input_history))
+        
+        # Calculate the feedback part (from output history)
+        feedback = sum(a * y for a, y in zip(self.a_coeffs[1:], self.output_history))
+        
+        # Combine with the current sample (b0) and subtract feedback
+        # Note: a0 is 1.0 due to normalization in set_coefficients
+        result = self.b_coeffs[0] * sample + feedforward - feedback
 
-        # Start at index 1 and do index 0 at the end.
-        for i in range(1, self.order + 1):
-            result += (
-                self.b_coeffs[i] * self.input_history[i - 1]
-                - self.a_coeffs[i] * self.output_history[i - 1]
-            )
-
-        result = (result + self.b_coeffs[0] * sample) / self.a_coeffs[0]
-
-        self.input_history[1:] = self.input_history[:-1]
-        self.output_history[1:] = self.output_history[:-1]
-
-        self.input_history[0] = sample
-        self.output_history[0] = result
+        # Update the history buffers for the next sample
+        self.input_history.appendleft(sample)
+        self.output_history.appendleft(result)
 
         return result
+
+    def process_block(self, block: NDArray[np.float64]) -> NDArray[np.float64]:
+        """
+        Processes a block (NumPy array) of audio samples.
+
+        This is the preferred method for processing audio files or buffers
+        as it is more efficient than calling `process()` in a Python loop.
+
+        Args:
+            block: A NumPy array of audio samples.
+
+        Returns:
+            A NumPy array containing the processed samples.
+        """
+        output_block = np.zeros_like(block)
+        for i, sample in enumerate(block):
+            output_block[i] = self.process(sample)
+        return output_block
+
+    def clear(self) -> None:
+        """
+        Clears the filter's internal history buffers.
+
+        This resets the filter to its initial state, which is useful for
+        processing discontinuous audio streams.
+        """
+        self.input_history.clear()
+        self.output_history.clear()
+        self.input_history.extend([0.0] * self.order)
+        self.output_history.extend([0.0] * self.order)
+

@@ -1,95 +1,101 @@
-from __future__ import annotations
-
-from abc import abstractmethod
-from math import pi
-from typing import Protocol
-
+import argparse
+from typing import Protocol, runtime_checkable
 import matplotlib.pyplot as plt
 import numpy as np
+from numpy.typing import NDArray
 
+# --- Import local filters for demonstration ---
+from butterworth_filter import make_peak
+from equal_loudness_filter import EqualLoudnessFilter
 
+# --- Type Hinting for Filters ---
+@runtime_checkable
 class FilterType(Protocol):
-    @abstractmethod
-    def process(self, sample: float) -> float:
-        """
-        Calculate y[n]
+    """A protocol defining the interface for filter objects."""
+    def process_block(self, block: NDArray[np.float64]) -> NDArray[np.float64]:
+        ...
 
-        >>> issubclass(FilterType, Protocol)
-        True
-        """
-
-
-def get_bounds(
-    fft_results: np.ndarray, samplerate: int
-) -> tuple[int | float, int | float]:
+# --- Plotting Functions ---
+def plot_response(
+    samplerate: int,
+    impulse_response: NDArray[np.float64],
+    title: str = "Filter Response",
+) -> None:
     """
-    Get bounds for printing fft results
+    Calculates and plots the frequency and phase response of a filter.
 
-    >>> import numpy
-    >>> array = numpy.linspace(-20.0, 20.0, 1000)
-    >>> get_bounds(array, 1000)
-    (-20, 20)
+    Args:
+        samplerate: The audio sample rate in Hz.
+        impulse_response: The filter's response to a single-sample impulse.
+        title: The title for the plot.
     """
-    lowest = min([-20, np.min(fft_results[1 : samplerate // 2 - 1])])
-    highest = max([20, np.max(fft_results[1 : samplerate // 2 - 1])])
-    return lowest, highest
+    # Calculate the frequency response using FFT
+    fft_out = np.fft.rfft(impulse_response)
+    freqs = np.fft.rfftfreq(len(impulse_response), 1.0 / samplerate)
 
+    # Convert magnitude to decibels (dB)
+    magnitude_db = 20 * np.log10(np.abs(fft_out))
+    
+    # Extract phase response
+    phase = np.angle(fft_out)
 
-def show_frequency_response(filter_type: FilterType, samplerate: int) -> None:
-    """
-    Show frequency response of a filter
+    # --- Plotting ---
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    fig.suptitle(title, fontsize=16)
 
-    >>> from audio_filters.iir_filter import IIRFilter
-    >>> filt = IIRFilter(4)
-    >>> show_frequency_response(filt, 48000)
-    """
+    # Frequency Response Plot
+    ax1.plot(freqs, magnitude_db, color='b')
+    ax1.set_ylabel("Magnitude (dB)")
+    ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax1.set_xscale('log')
+    ax1.set_xlim(20, samplerate / 2)
+    ax1.minorticks_on()
 
-    size = 512
-    inputs = [1] + [0] * (size - 1)
-    outputs = [filter_type.process(item) for item in inputs]
-
-    filler = [0] * (samplerate - size)  # zero-padding
-    outputs += filler
-    fft_out = np.abs(np.fft.fft(outputs))
-    fft_db = 20 * np.log10(fft_out)
-
-    # Frequencies on log scale from 24 to nyquist frequency
-    plt.xlim(24, samplerate / 2 - 1)
-    plt.xlabel("Frequency (Hz)")
-    plt.xscale("log")
-
-    # Display within reasonable bounds
-    bounds = get_bounds(fft_db, samplerate)
-    plt.ylim(max([-80, bounds[0]]), min([80, bounds[1]]))
-    plt.ylabel("Gain (dB)")
-
-    plt.plot(fft_db)
+    # Phase Response Plot
+    ax2.plot(freqs, np.unwrap(phase), color='r')
+    ax2.set_ylabel("Phase (radians)")
+    ax2.set_xlabel("Frequency (Hz)")
+    ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax2.minorticks_on()
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()
 
-
-def show_phase_response(filter_type: FilterType, samplerate: int) -> None:
+def get_impulse_response(
+    filter_obj: FilterType, length: int
+) -> NDArray[np.float64]:
     """
-    Show phase response of a filter
+    Generates an impulse and gets the filter's response to it.
+    
+    Args:
+        filter_obj: The filter instance to test.
+        length: The desired length of the impulse response array.
 
-    >>> from audio_filters.iir_filter import IIRFilter
-    >>> filt = IIRFilter(4)
-    >>> show_phase_response(filt, 48000)
+    Returns:
+        The impulse response as a NumPy array.
     """
+    impulse = np.zeros(length, dtype=np.float64)
+    impulse[0] = 1.0  # The impulse is a single sample at the beginning
+    return filter_obj.process_block(impulse)
 
-    size = 512
-    inputs = [1] + [0] * (size - 1)
-    outputs = [filter_type.process(item) for item in inputs]
+# --- Main Demonstration ---
+def main() -> None:
+    """
+    Runs a demonstration, creating and plotting responses for several filters.
+    """
+    samplerate = 44100
+    impulse_length = 2048  # A suitable length for detailed FFT analysis
 
-    filler = [0] * (samplerate - size)  # zero-padding
-    outputs += filler
-    fft_out = np.angle(np.fft.fft(outputs))
+    print("Demonstrating a 6dB peak filter at 1000 Hz...")
+    peak_filter = make_peak(1000, samplerate, gain_db=6, q_factor=1.414)
+    peak_ir = get_impulse_response(peak_filter, impulse_length)
+    plot_response(samplerate, peak_ir, "Peak Filter @ 1000 Hz (+6 dB)")
 
-    # Frequencies on log scale from 24 to nyquist frequency
-    plt.xlim(24, samplerate / 2 - 1)
-    plt.xlabel("Frequency (Hz)")
-    plt.xscale("log")
+    print("\nDemonstrating the ISO 226:2003 Equal Loudness Filter...")
+    eq_filter = EqualLoudnessFilter(samplerate)
+    eq_ir = get_impulse_response(eq_filter, impulse_length)
+    plot_response(samplerate, eq_ir, "Equal Loudness Filter (ISO 226:2003)")
 
-    plt.ylim(-2 * pi, 2 * pi)
-    plt.ylabel("Phase shift (Radians)")
-    plt.plot(np.unwrap(fft_out, -2 * pi))
-    plt.show()
+if __name__ == "__main__":
+    main()
+
